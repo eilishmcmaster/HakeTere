@@ -1,0 +1,575 @@
+---
+title: "SOS Hakea teretifolia"
+author: "Eilish"
+date: '2022-06-03'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(dplyr)
+library(propr)
+library(data.table)
+library(ggfortify)
+library(ggpubr)
+library(pracma)
+library(vegan)
+library(ade4)
+library(ape)
+library(phylogram)
+library(dendextend)
+library(RRtools)
+library(ggthemes)
+# library(FactoMineR)
+library(RColorBrewer)
+library(ozmaps) #draws australia coastlines and state boundaries
+library(adegenet)
+library(ggrepel)
+library(ggtree)
+library(openxlsx)
+library(devtools)
+
+knitr::opts_knit$set(root.dir = '/Users/eilishmcmaster/Documents/HakeTere')
+```
+
+
+
+```{r}
+topskip   <- 6
+nmetavar  <- 18
+RandRbase <- "" #main directory 
+species <- "HakeTere" #species name
+dataset <- "DHak19-4434" #dart order
+missingness <- 0.3
+# keyspecies <- "fragrans"
+# outgroup <- "milesiae"
+```
+
+```{r import data }
+source_url("https://github.com/eilishmcmaster/SoS_functions/blob/main/sos_functions.R?raw=TRUE")
+source_url("https://github.com/eilishmcmaster/SoS_functions/blob/main/resample_functions.R?raw=TRUE")
+```
+
+## Import data 
+```{r import data }
+
+d1 <- new.read.dart.xls.onerow(RandRbase,species,dataset,topskip, nmetavar, euchits=FALSE) #read DArT file
+c1 <- custom.read(species, dataset) #read custom metadata csv
+
+m2 <- c1
+
+d2        <- remove.poor.quality.snps(d1, min_repro=0.96, max_missing=missingness)
+d3        <- sample.one.snp.per.locus.random(d2, seed=12345)
+
+mm1        <- read.meta.data(d3, RandRbase, species, dataset, fields=(ncol(c1)-4))
+# d3 <- dart.remove.samples(d3, missingness)
+dms2       <- dart.meta.data.merge(d3, mm1)
+dms <- dms2
+
+d4 <- as.data.frame(dms2[["gt"]])   #convert list DArT allele frequencies to dataframe 
+d4$miss <- apply(d4, 1, function(z) sum(is.na(z))/ncol(d4)) # count NA per row (sample)
+d4$miss2 <- apply(d4, 1, function(z) ncol(d4)-sum(is.na(z))) # count NA per row (sample)
+
+
+ggplot(d4, aes(x=miss))+geom_histogram(bins=200)+
+  geom_vline(xintercept =missingness, col="red", linetype="dotted")+theme_few()+
+  xlab("NA count per sample") # histgoram of NA counts, red line is 80% missingness
+
+ggplot(d4, aes(x=miss2))+geom_histogram(bins=200)+
+  geom_vline(xintercept =((1-missingness)*ncol(d4)), col="red", linetype="dotted")+theme_few()+
+  xlab("SNPs per sample")+ scale_x_continuous(breaks = pretty(d4$miss2, n = 10), limits = c(0,max(d4$miss2)))
+
+
+dmv <- remove.by.list(dms2, dms2$sample_names[!(is.na(dms2$meta$analyses[,"families"]))])
+
+# remove bad families
+dmv <- remove.by.list(dmv, dmv$sample_names[!(dmv$meta$analyses[,"pop"] %in% c("SR", "TP"))])
+
+# use only common alleles from the species overall (species is only family groups, but includes all sites)
+dmv <- remove.by.maf(dmv, 0.05) #### important
+
+# get the number of total common alleles
+dms <- dmv
+
+common_alleles <- length(dms$locus_names)*2
+```
+
+```{r Analyses per population}
+#### varying family number ###
+
+# resample and get allele counts for all populations individually
+pops <- unique(dms$meta$analyses[,"pop"])
+out <- list()
+for(i in 1:length(pops)){ # achieves the same thing as previous function because it was by population 
+  dms_x <- remove.by.list(dms, m2[m2$pop %in% pops[i],]%>% .$sample)
+  schemes_x <- scheming_functionz(dms_x,
+                                  seedvector = rep(1,9),
+                                  famvector = c(1:9),
+                                  popvector = rep(1,9),
+                                  nr=10) #get the sampling schemes
+  resample <- resample_analysis_functionz(dms_x, schemes_x, 0.00, pops[i]) # using MAF=0 means all loci that have at least one allele are included -- this can be increased to have a MAF filter per population (only common alleles in that population are counted)
+  out[[i]] <- resample
+}
+
+
+out_df <- cleanup_out_list(out)
+out_df <- out_df[!is.na(out_df$alleles),]
+
+hlines <- unique(out_df[,c("pop","total_alleles")])
+
+#plot alleles
+family_allele_plot <- ggplot(out_df, aes(x=factor(nfam), y=as.numeric(alleles), color=pop))+geom_boxplot(outlier.size = 0)+theme_few()+
+  geom_point(position = position_jitterdodge(jitter.width = .05, dodge.width = 0.75), size=0.5)+
+  geom_hline(yintercept = common_alleles)+
+  ylim(0,(common_alleles+200))+
+  labs(y="Total alleles", x="n fam")+facet_grid(.~pop)+
+  geom_hline(data=hlines, aes(yintercept=as.numeric(total_alleles), color=pop))
+
+family_allele_plot
+
+# plot proportion of alleles recovered per group
+family_proportion_plot <- ggplot(out_df, aes(x=factor(nfam), y=as.numeric(prop_pergroup), color=pop))+
+  geom_boxplot(outlier.size = 0)+
+  theme_few()+
+  geom_point(position = position_jitterdodge(jitter.width = .05, dodge.width = 0.75), size=0.5)+
+  labs(y="Proportion of\npop alleles", x="n fam", color="Population")+
+  ylim(0,1)+facet_grid(.~pop)
+  # geom_hline(yintercept = c(0.9,0.95,1))
+
+family_proportion_plot
+
+#### varying seed number ###~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# resample and get allele counts for all populations individually
+pops <- unique(dms$meta$analyses[,"pop"])
+out2 <- list()
+
+
+for(i in 1:length(pops)){
+  dms_x <- remove.by.list(dms, m2[m2$pop %in% pops[i],]%>% .$sample)
+  schemes_x <- scheming_functionz(dms_x, 
+                                  seedvector = c(1:10), 
+                                  famvector = rep(1,10), 
+                                  popvector = rep(1,10),
+                                  nr=10) #get the sampling schemes
+  resample <- resample_analysis_functionz(dms_x, schemes_x, 0.00, pops[i]) # using MAF=0 means all loci that have at least one allele are included -- this can be increased to have a MAF filter per population (only common alleles in that population are counted)
+  out2[[i]] <- resample
+}
+
+
+out_df2 <- cleanup_out_list(out2)
+out_df2 <- out_df2[!is.na(out_df2$alleles),]
+
+# hlines 
+hlines2 <- unique(out_df2[,c("pop","total_alleles")])
+
+#plot alleles
+seed_allele_plot <- ggplot(out_df2, aes(x=factor(nseed), y=as.numeric(alleles), color=pop))+geom_boxplot(outlier.size = 0)+theme_few()+
+  geom_point(position = position_jitterdodge(jitter.width = .05, dodge.width = 0.75), size=0.5)+
+  geom_hline(yintercept = common_alleles)+
+  ylim(0,(common_alleles+200))+
+  labs(y="Total alleles", x="n seeds")+facet_grid(.~pop)+
+  geom_hline(data=hlines2, aes(yintercept=as.numeric(total_alleles), color=pop))
+
+seed_allele_plot
+
+# plot proportion of alleles recovered per group
+seed_proportion_plot <- ggplot(out_df2, aes(x=factor(nseed), y=prop_pergroup, color=pop))+geom_boxplot(outlier.size = 0)+theme_few()+
+  geom_point(position = position_jitterdodge(jitter.width = .05, dodge.width = 0.75), size=0.5)+
+  labs(y="Proportion of\npop alleles", x="n seeds", color="Population")+
+  ylim(0,1)+facet_grid(.~pop)
+
+seed_proportion_plot
+library(tidyverse)
+
+ggarrange(family_allele_plot, seed_allele_plot, nrow=2, labels=c("A","B")) 
+  # annotate_figure(fig.lab.pos="bottom.left",fig.lab=str_wrap("Total number of alleles recovered in resampled groups (randomly selected individuals) from each population. Resample strategies increased by A) number of families (i.e. 1 seed for 2 families, 1 seed from 3 families etc), or B) number of seeds per family (i.e. 2 seeds from 1 family, 3 seeds from 1 family etc). The horizontal coloured line in each plot is the total number of alleles present in that population, and the black horizontal line indicates the total number of common alleles (MAF>=0.05) present in the metapopulation.", width=100, whitespace_only=FALSE))
+
+ggarrange(family_proportion_plot, seed_proportion_plot, nrow=2, labels=c("A","B")) # proportion of each site's diversity 
+```
+```{r nseed by nfamily from 1 population, message=FALSE, warning=FALSE}
+
+a <- 1:10 # get vector 1:5
+a2 <- expand.grid(a,a) # get permutations of vector (seed and family combinations)
+schemes_all <- scheming_functionz(dmv, seedvector = a2[,1],
+                                  famvector = a2[,2],
+                                  popvector = rep(1, nrow(a2)), # change the number of pops sampled 
+                                  nr=10) # i.e. 1 seed from 1 families in ALL pops (5 seeds total)
+
+resample <- resample_analysis_functionz(dmv, schemes_all, 0.05, "all") %>% as.data.frame(.)
+
+resample[,1:8] <- lapply(resample[,1:8],as.numeric)
+
+resample <- resample[!(resample$alleles==0),]
+
+
+x <- aggregate(cbind(alleles, total_loci,total_alleles,prop_all, prop_pergroup)~nseed+nfam+pop, data=resample, mean) #add sd column?
+
+y <- dcast(x[,c("nseed","nfam", "prop_pergroup")], nseed~nfam, value.var="prop_pergroup")
+rownames(y) <- y[,1]
+y[,1]<- NULL
+# y
+
+library(ComplexHeatmap)
+library(circlize)
+
+matrix <- as.matrix(y)
+Heatmap(matrix, 
+        name="Proportion\nspecies diversity",
+        row_title = "seed",
+        column_title = "family",
+        row_names_max_width = unit(15, "cm"),
+        border_gp = gpar(col = "black", lty = 1),
+        column_order=rev(colnames(y)),
+        row_order=rev(rownames(y)),
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 10),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(sprintf("%.3f", matrix[i, j]), x, y, gp = gpar(fontsize = 10))}
+)
+
+```
+
+
+```{r npop by nfamily for 1 seed, message=FALSE, warning=FALSE}
+
+a <- 1:10 # get vector 1:5
+a2 <- expand.grid(a,a) # get permutations of vector (seed and family combinations)
+
+#at high family numbers it can only return the IDs of samples in families of the appropriate size, so pops actually sampled from goes down 
+schemes_all <- scheming_functionz(dmv, seedvector = rep(1, nrow(a2)),
+                                  famvector = a2[,1],
+                                  popvector = a2[,2],
+                                  nr=15) # i.e. 1 seed from 1 families in ALL pops (5 seeds total)
+
+resample <- resample_analysis_functionz(dmv, schemes_all, 0.05, "all") %>% as.data.frame(.)
+resample[,1:8] <- lapply(resample[,1:8],as.numeric)
+
+resample <- resample[!(resample$alleles==0),]
+
+x <- aggregate(cbind(alleles, total_loci,total_alleles,prop_all, prop_pergroup)~nfam+npop+pop, data=resample, mean) #add sd column?
+
+y <- dcast(x[,c("nfam","npop","prop_all")], npop~nfam, value.var="prop_all")
+rownames(y) <- y[,1]
+y[,1]<- NULL
+# y
+
+library(ComplexHeatmap)
+library(circlize)
+
+matrix <- as.matrix(y)
+Heatmap(matrix, 
+        name="Proportion\nspecies diversity",
+        row_title = "pop",
+        column_title = "family",
+        row_names_max_width = unit(15, "cm"),
+        border_gp = gpar(col = "black", lty = 1),
+        column_order=rev(colnames(y)),
+        row_order=rev(rownames(y)),
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 10),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(sprintf("%.3f", matrix[i, j]), x, y, gp = gpar(fontsize = 10))}
+)
+
+```
+
+
+```{r Geographic plot}
+### Geographic plot ####
+
+
+library(SNPRelate)
+
+gds_file <- dart2gds(dmv, RandRbase, species, dataset)
+
+pFst      <- population.pw.Fst(dmv, dmv$meta$analyses[,"pop"], RandRbase,species,dataset) #calculates genetic distance 
+
+library(geosphere)
+pS        <- population.pw.spatial.dist(dmv, dmv$meta$analyses[,"pop"]) #calculates geographic distance between populations
+
+####plot IBD plot
+
+library(reshape2) #for melting data
+library(vegan) #for mantel test
+
+#tiff("E:/test/test fst plot.tiff", units="in", width=10, height=5, res=300)
+Fst_sig <- cbind(melt(pS$S), unlist(as.list(pFst$Fst)))
+colnames(Fst_sig)[3] <- "Geo_dist"
+colnames(Fst_sig)[4] <- "Fst"
+Fst_sig$Geo_dist2 <-Fst_sig$Geo_dist/1000 
+
+man <- mantel(xdis = pS$S, ydis = pFst$Fst, permutations = 999, na.rm = TRUE) #mantel test for IBD
+
+ggplot(Fst_sig, aes(x= Geo_dist2, y=Fst))+geom_point(alpha=0.3)+labs(x="Distance (km)", y="Fst", title="Pairwise Fst plots")+
+annotation_custom(textGrob(paste("Mantel statistic r is", round(man$statistic, 3), ", P =", man$signif),
+                           x=0.8,  y=0.1, gp=gpar(col="red", fontsize=8, fontface="italic")))+
+  theme_bw()
+
+
+
+geo_d <-pS$S #this is a square matrix
+geo_d <- geo_d/1000
+# geo_d[upper.tri(geo_d)] <- NA #makes the upper triangular part of the matrix into nothing
+rownames(geo_d) <- colnames(pS$S) #make sure rownames are the same as colnames
+
+dimnames <- list (var1 = colnames(pS$S), var2 = colnames(pS$S)) 
+mat <- matrix(geo_d, ncol=length(colnames(geo_d)), nrow=length(colnames(geo_d)), dimnames = dimnames)
+
+genetic_d <-pFst$Fst
+rownames(genetic_d) <- colnames(pFst$Fst)
+
+dimnames2 <- list (var1 = colnames(pFst$Fst), var2 = colnames(pFst$Fst))
+mat2 <- matrix(genetic_d, ncol=length(colnames(geo_d)), nrow=length(colnames(geo_d)), dimnames = dimnames)
+# 
+
+
+palette <-  colorRamp2(c(0, max(mat)), c("white", "#80B1D3"))
+geo <- Heatmap(mat, col=palette,
+               row_names_gp = gpar(fontsize = 8),
+               column_names_gp = gpar(fontsize = 8),
+               row_names_max_width = unit(15, "cm"),
+               border_gp = gpar(col = "black", lty = 1),
+               # column_order=column_order(pairwise_pop),
+               name="Distance (km)"
+ )
+
+
+
+## Genetic analysis ####
+
+
+a <- unique(dmv$meta$analyses[,"pop"])
+a2 <- expand.grid(a,a)
+
+
+schemes_all <- scheming_functionz2(dmv, seedvector = rep(1, nrow(a2)),
+                                   famvector = rep(4, nrow(a2)),
+                                   popvector = a2, # change the number of pops sampled 
+                                   nr=10) # i.e. 1 seed from 1 families in ALL pops (5 seeds total)
+
+resample <- resample_analysis_functionz2(dmv, schemes_all, 0.05, "all") %>% as.data.frame(.)
+resample[,1:7] <- lapply(resample[,1:7],as.numeric)
+
+
+resample <- resample[!(resample$alleles==0),]
+
+y <- dcast(resample[,c("pop1","pop2", "prop_pergroup")], pop1~pop2, value.var="prop_pergroup", mean)
+
+rownames(y) <- y[,1]
+y[,1]<- NULL
+# y
+
+library(ComplexHeatmap)
+library(circlize)
+
+matrix <- as.matrix(y)
+pairwise_pop <- Heatmap(matrix, 
+                        name="Proportion\nspecies diversity",
+                        # row_title = "seed",
+                        # column_title = "family",
+                        row_names_max_width = unit(15, "cm"),
+                        border_gp = gpar(col = "black", lty = 1),
+                        column_order=column_order(geo),
+                        row_names_gp = gpar(fontsize = 8),
+                        column_names_gp = gpar(fontsize = 8),
+                        cell_fun = function(j, i, x, y, width, height, fill) {
+                          grid.text(sprintf("%.3f", matrix[i, j]), x, y, gp = gpar(fontsize = 8))}
+)
+
+pairwise_pop
+
+
+
+## Draw combined plot ####
+
+draw(geo+pairwise_pop)
+
+
+
+```
+
+
+```{r}
+distances <- melt(mat, value.name = "dist", varnames= c("pop1","pop2"))
+
+test <- merge(resample,distances, by=c("pop1","pop2"))
+test$prop_dist <- test$dist/(max(test$dist))
+
+
+ggplot(test, aes(x=dist, y=prop_all))+
+  theme_bw()+geom_point()
+
+y2<- melt(as.matrix(y), value.name = "prop_all")
+Fst_sig <- merge(y2, Fst_sig, by=c("Var1", "Var2"))
+
+ggplot(Fst_sig, aes(x=Fst, y=prop_all))+
+  theme_bw()+geom_point()
+
+
+
+
+```
+
+
+```{r}
+
+
+a <- 1:10 # get vector 1:10 for nseed and nfeed 
+b <- 1:7 # fam
+c <- 1:6 # pop
+
+a2 <- expand.grid(a,b,c) # get permutations of vector (seed and family combinations)
+schemes_all <- scheming_functionz(dmv, seedvector = a2[,1],
+                                  famvector = a2[,2],
+                                  popvector = a2[,3],
+                                  nr=10) # i.e. 1 seed from 1 families in ALL pops (5 seeds total)
+
+resamplez <- resample_analysis_functionz(dmv, schemes_all, 0.05, "all") %>% as.data.frame(.)  
+
+
+resamplez[,1:8] <- lapply(resamplez[,1:8],as.numeric)
+resamplez <- resamplez[resamplez$alleles>0,]
+resamplez$treatment <- paste0(resamplez$nseed, "s x ", resamplez$nfam, "f")
+
+
+ggplot(resamplez, aes(x=npop, y=prop_all, color=treatment, group=interaction(treatment, npop)))+
+  # geom_point()+
+  # geom_boxplot(outlier.size = 0)+
+  theme_bw()+
+  stat_summary(fun=mean, geom="line", aes(group=treatment, color=treatment))
+  # stat_summary(fun=mean, geom="line", aes(group=treatment, color=nfam))+
+  # labs(color="number of families")
+  # facet_grid(.~factor())
+
+ggplot(resamplez, aes(x=npop, y=prop_all, color=nfam, group=interaction(treatment, npop)))+
+  theme_bw()+
+  stat_summary(fun=mean, geom="line", aes(group=treatment, color=nfam))
+
+ggplot(resamplez, aes(x=npop, y=prop_all, color=nseed, group=interaction(treatment, npop)))+
+  theme_bw()+
+  stat_summary(fun=mean, geom="line", aes(group=treatment, color=factor(nseed)))+
+  facet_grid(.~factor(nfam))
+
+
+# multiple linear regression ( multiple input variables and metric dependent variable)
+
+# get test and training data
+
+set.seed(42)
+splitIndex <- sample(nrow(resamplez), nrow(resamplez) * 0.7)
+trainData <- resamplez[splitIndex, ]
+testData <- resamplez[-splitIndex, ]
+
+# need to set upper limit on this model of 0***
+model <- lm(prop_all ~ log(nseed) * log(nfam) * log(npop), data = trainData)
+testData$predictions_lm <- predict(model, newdata = testData, type = "response")
+rmse <- sqrt(mean((testData$predictions_lm - testData$prop_all)^2))
+
+library(betareg)
+trainData[trainData$prop_all==1, "prop_all"] <- trainData[trainData$prop_all==1, "prop_all"]-0.00001
+modelb <- betareg(prop_all ~ log(nseed) * log(nfam) * log(npop), data = trainData)
+testData$predictions_b <- predict(modelb, newdata = testData, type = "response")
+rmse_b <- sqrt(mean((testData$predictions_b - testData$prop_all)^2))
+
+m <- melt(testData[,c("prop_all","predictions_b","predictions_lm")], id="prop_all")
+
+ggplot(m, aes(x=prop_all, y=value, color=variable))+
+  # geom_ribbon(aes(ymin = predict(loess(sd_min~ mean_prop)),ymax = predict(loess(sd_max~ mean_prop))),
+  #             alpha = 0.3,fill = 'green', color=NA)+
+  geom_segment(aes(xend=prop_all, yend=prop_all), alpha=0.5)+
+  geom_abline(alpha=0.5)+
+  geom_point(alpha=0.5)+theme_few()+
+  labs(x="Actual diversity proportion", y="Predicted diversity proportion")+
+  facet_grid(.~variable)
+
+
+rsq <- summary(model)$r.squared
+
+
+# http://www.sthda.com/english/articles/39-regression-model-diagnostics/161-linear-regression-assumptions-and-diagnostics-in-r-essentials/
+par(mfrow=c(2,2))
+plot(model)
+
+summary(model)
+# do these variables impact alleles ?
+# can predict alleles with this model by inputing variables
+
+
+a <- 1 # get vector 1:10 for nseed and nfeed 
+b <- 1:7 # fam
+c <- 1:6 # pop
+
+a2 <- expand.grid(a,b,c) # get permutations of vector (seed and family combinations)
+colnames(a2) <- c("nseed", "nfam", "npop")
+p <- predict(modelb, newdata = a2) %>% data.frame(predicted=.)
+# what combination of variables reaches the threshold
+p2 <- cbind(a2, p)
+
+library(plotly)
+
+plot_ly(resamplez, x=~npop, y=~nfam, z=~prop_all, alpha=0.3)
+
+plot_ly(p2, x=~npop, y=~nfam, z=~predicted)
+
+
+```
+
+
+
+```{r}
+# The difference in range for the predictor variable nfam between the datasets A and B can affect the performance of an ensemble method, as the models may not generalize well to the new data. This is because the models were trained on different distributions of the predictor variables and may have different relationships with the response variable.
+# 
+# One approach to address this issue is to transform the predictor variable nfam in both datasets to the same range, for example by normalizing or standardizing the values. Another approach is to fit separate models for each dataset, and then use an ensemble method that is able to weight the predictions of the different models according to their performance on the corresponding dataset. This is known as heterogeneous ensemble learning.
+# 
+# Additionally, it's important to assess the performance of the ensemble model on an independent test dataset, to ensure that it is not overfitting and generalizing well to unseen data. The performance metrics used to evaluate the models, such as mean squared error (MSE), root mean squared error (RMSE), coefficient of determination (R^2), and others, can be used to compare the performance of the ensemble model with the individual models.
+# 
+# In conclusion, it is important to consider the differences in the training data when combining regression models from multiple datasets, as it can affect the performance of the ensemble method. However, with proper preprocessing and evaluation, it is possible to create an ensemble model that can leverage the strengths of multiple models and improve the overall performance.
+
+r <- resamplez
+# for(i in 1:3){
+#   r[,i] <- r[,i]/max(r[,i])
+# }
+r[,3] <- r[,3]/max(r[,3])
+
+
+
+set.seed(42)
+splitIndex <- sample(nrow(r), nrow(r) * 0.7)
+trainData <- r[splitIndex, ]
+testData <- r[-splitIndex, ]
+
+# need to set upper limit on this model of 0***
+model <- lm(prop_all ~ log(nseed) * log(nfam) * log(npop), data = trainData)
+testData$predictions_lm <- predict(model, newdata = testData, type = "response")
+rmse <- sqrt(mean((testData$predictions_lm - testData$prop_all)^2))
+
+library(betareg)
+trainData[trainData$prop_all==1, "prop_all"] <- trainData[trainData$prop_all==1, "prop_all"]-0.00001
+modelb <- betareg(prop_all ~ log(nseed) * log(nfam) * log(npop), data = trainData)
+testData$predictions_b <- predict(modelb, newdata = testData, type = "response")
+rmse_b <- sqrt(mean((testData$predictions_b - testData$prop_all)^2))
+
+m <- melt(testData[,c("prop_all","predictions_b","predictions_lm")], id="prop_all")
+
+ggplot(m, aes(x=prop_all, y=value, color=variable))+
+  # geom_ribbon(aes(ymin = predict(loess(sd_min~ mean_prop)),ymax = predict(loess(sd_max~ mean_prop))),
+  #             alpha = 0.3,fill = 'green', color=NA)+
+  geom_segment(aes(xend=prop_all, yend=prop_all), alpha=0.5)+
+  geom_abline(alpha=0.5)+
+  geom_point(alpha=0.5)+theme_few()+
+  labs(x="Actual diversity proportion", y="Predicted diversity proportion")+
+  facet_grid(.~variable)
+
+paste("RMSE of lm: ", rmse)
+paste("RMSE of glm betareg; ", rmse_b)
+
+```
+```{r}
+# 
+# aterm_model <- betareg(prop_all ~ log(nseed) * log(nfam) * log(npop), data = resamplez)
+# load('/Users/eilishmcmaster/Documents/AcacSuav/AcacSuav/outputs/asuav_model.RData')
+# load('/Users/eilishmcmaster/Documents/AcacLini/AcacLini/outputs/alini_model.RData')
+# 
+
+```
