@@ -194,9 +194,55 @@ a2 <- expand.grid(a,a) # get permutations of vector (seed and family combination
 schemes_all <- scheming_functionz(dmv, seedvector = a2[,1],
                                   famvector = a2[,2],
                                   popvector = rep(1, nrow(a2)), # change the number of pops sampled 
-                                  nr=10) # i.e. 1 seed from 1 families in ALL pops (5 seeds total)
+                                  nr=20) # i.e. 1 seed from 1 families in ALL pops (5 seeds total)
+schemes_all <- Filter(function(x) length(x$svec) > 0, schemes_all)
 
-resample <- resample_analysis_functionz(dmv, schemes_all, 0.05, "all") %>% as.data.frame(.)
+
+## filter the schemes to remove scenarios that dont have many resamples (resamples < nr)
+my_list <- schemes_all
+
+# remove svec from the schemes
+for (i in seq_along(my_list)) {
+  my_list[[i]]$svec <- NULL
+}
+my_df <- do.call(rbind, lapply(my_list, as.data.frame))
+
+# Group the data frame by nseed, nfam, and npop, and count the number of rows in each group
+my_counts <- my_df %>% group_by(nseed, nfam, npop) %>% summarise(count = n())
+
+
+# Print the counts
+my_counts
+
+# remove all sampling combinations that have <10 sampling schemes
+filtered_df <- my_counts[my_counts$count<10,1:3]
+
+list_of_dfs <- split(filtered_df, seq(nrow(filtered_df)))
+
+# Use lapply to convert each data frame in the list to a list
+remove_lists <- lapply(list_of_dfs, as.list)
+
+# loop over each list in remove_lists, and generate a key for each list based on its nseed, nfam, and npop values
+remove_keys <- lapply(remove_lists, function(x) paste0(x$nseed, "_", x$nfam, "_", x$npop))
+
+# filter schemes_all to remove any lists that have a matching key in remove_keys
+schemes_all_filtered <- schemes_all[!sapply(schemes_all, function(x) paste0(x$nseed, "_", x$nfam, "_", x$npop) %in% remove_keys)]
+
+
+# Convert list of lists to data frame
+schemes_all_df <- do.call(rbind, schemes_all_filtered) %>% as.data.frame(.)
+
+# Downsample to 10 lists per unique combination of nseed, nfam, and npop
+schemes_all_downsampled_df <- schemes_all_df %>%
+  group_by(nseed, nfam, npop) %>%
+  slice_sample(n = 10, replace = FALSE)%>%
+  as.data.frame(.)
+
+schemes_all_downsampled <- apply(schemes_all_downsampled_df, 1, function(x) as.list(x))
+
+
+## resample to get allele info
+resample <- resample_analysis_functionz(dmv, schemes_all_downsampled, 0.05, "all") %>% as.data.frame(.)
 
 resample[,1:8] <- lapply(resample[,1:8],as.numeric)
 
